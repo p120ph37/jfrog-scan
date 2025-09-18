@@ -1,0 +1,21 @@
+{
+  "name": "jfrog-scan",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CLI to audit JFrog Artifactory npm proxy cache for package versions and last-download time",
+  "scripts": {
+    "start": "node src/cli.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "bin": {
+    "jfrog-scan": "src/cli.js"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {}
+}
+
