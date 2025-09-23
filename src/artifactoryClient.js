@@ -1,14 +1,3 @@
-function buildAuthHeader(config) {
-  if (config.accessToken) {
-    return { Authorization: `Bearer ${config.accessToken}` };
-  }
-  if (config.username && config.password) {
-    const encoded = Buffer.from(`${config.username}:${config.password}`).toString('base64');
-    return { Authorization: `Basic ${encoded}` };
-  }
-  return {};
-}
-
 export class ArtifactoryClient {
   baseUrl;
   repository;
@@ -19,7 +8,13 @@ export class ArtifactoryClient {
     this.repository = config.repository;
     this.headers = {
       Accept: 'application/json',
-      ...buildAuthHeader(config),
+      ...(
+        config.accessToken ?
+        { Authorization: `Bearer ${config.accessToken}` }
+        : config.username && config.password ?
+        { Authorization: `Basic ${Buffer.from(`${config.username}:${config.password}`).toString('base64')}` }
+        : {}
+      ),
     };
   }
 
@@ -34,7 +29,12 @@ export class ArtifactoryClient {
     return `${pkgName}/-/${pkgName}-${version}.tgz`;
   }
 
-  async checkCache(pkgName, version) {
+  async checkCache(spec) {
+    const at = spec.lastIndexOf('@');
+    if (at <= 0) throw new Error(`Invalid package specifier: ${spec}. Use name@version`);
+    const pkgName = spec.slice(0, at);
+    const version = spec.slice(at + 1);
+    if (!version) throw new Error(`Missing version in specifier: ${spec}`);
     const path = this.tarballPath(pkgName, version);
     // Encode each segment to safely handle '@' in scopes, spaces, etc.
     const encodedPath = path
@@ -46,19 +46,19 @@ export class ArtifactoryClient {
 
     try {
       const storageResp = await this.#getJson(storageUrl);
-      const exists = Boolean(storageResp && storageResp.repo);
-      if (!exists) {
-        return { package: pkgName, version, existsInCache: false };
+      const existsInCache = Boolean(storageResp && storageResp.repo);
+      if (!existsInCache) {
+        return { package: pkgName, version, existsInCache };
       }
 
       const statsResp = await this.#getJson(statsUrl);
-      const lastDownloadedIso = statsResp?.lastDownloaded ? new Date(statsResp.lastDownloaded).toISOString() : undefined;
+      const lastDownloaded = statsResp?.lastDownloaded ? new Date(statsResp.lastDownloaded).toISOString() : undefined;
 
       return {
         package: pkgName,
         version,
-        existsInCache: true,
-        lastDownloaded: lastDownloadedIso,
+        existsInCache,
+        lastDownloaded,
         additional: {
           downloadCount: statsResp?.downloadCount,
           lastDownloadedBy: statsResp?.lastDownloadedBy,

@@ -10,27 +10,31 @@ npm install
 
 ### Usage
 
-- Reference: [Wiz blog Shai-Hulud impacted packages](https://www.wiz.io/blog/shai-hulud-npm-supply-chain-attack#appendix-impacted-packages-41)
-
-1) Scrape Wiz blog to stdout (no scan):
+1) Scrape all suggested sources to stdout (no scan):
 ```bash
-npm start -- --scrape-url https://www.wiz.io/blog/shai-hulud-npm-supply-chain-attack
+npm start -- --scrape-all
 ```
 
-2) Scrape Wiz blog and scan Artifactory:
+2) Scrape a specific source to stdout (no scan):
+```bash
+npm start -- --scrape-url https://example.com/some-list
+```
+
+3) Scrape all and scan Artifactory:
 ```bash
 npm start -- \
-  --scrape-url https://www.wiz.io/blog/shai-hulud-npm-supply-chain-attack \
+  --scrape-all \
   -u https://your-artifactory.example.com/artifactory -r npm-remote --token XXXXX
 ```
 
-3) Scan from a file:
+4) Scan from stdin:
 ```bash
-npm start -- --file packages.txt \
-  -u https://your-artifactory.example.com/artifactory -r npm-remote --token XXXXX
+npm start -- \
+  -u https://your-artifactory.example.com/artifactory -r npm-remote --token XXXXX \
+  < packages.txt
 ```
 
-4) Positive-hit example:
+5) Positive-hit (stdin) example:
 ```bash
 echo 'babel-core@6.26.3' | npm start -- \
   -u https://your-artifactory.example.com/artifactory -r npm-remote \
