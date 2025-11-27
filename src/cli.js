@@ -5,9 +5,11 @@ import { ArtifactoryClient } from './artifactoryClient.js';
 
 // Central list of suggested sources (also shown in --help)
 const SUGGESTED_SOURCES = [
-  'https://www.wiz.io/blog/shai-hulud-npm-supply-chain-attack',
-  'https://security.snyk.io/shai-hulud-npm-supply-chain-attack-sep-2025',
-  'https://jfrog.com/blog/shai-hulud-npm-supply-chain-attack-new-compromised-packages-detected/',
+//  'https://www.wiz.io/blog/shai-hulud-npm-supply-chain-attack',
+//  'https://security.snyk.io/shai-hulud-npm-supply-chain-attack-sep-2025',
+//  'https://jfrog.com/blog/shai-hulud-npm-supply-chain-attack-new-compromised-packages-detected/',
+  'https://www.wiz.io/blog/shai-hulud-2-0-ongoing-supply-chain-attack',
+  'https://research.jfrog.com/shai_hulud_2_packages.csv',
 ];
 
 const helpDescription = [
@@ -94,7 +96,96 @@ const main = async () => {
   rows.forEach((row) => console.log(printRow(row)));
 };
 
-// Extract package names and versions from text content (supports Wiz, Snyk text, and JFrog list formats)
+// Extract package names and versions from JFrog CSV format
+// Format: package_name,package_type,versions,xray_ids
+// Example: @posthog/agent,npm,[1.24.1],XRAY-898290
+// Example: @asyncapi/cli,npm,"[4.1.2], [4.1.3]",XRAY-898365
+const extractImpactedFromCsv = (csvContent) => {
+  const results = [];
+  const lines = csvContent.split('\n');
+  
+  for (const line of lines) {
+    // Skip header and empty lines
+    if (!line.trim() || line.startsWith('package_name,')) continue;
+    
+    // Parse CSV line (handles quoted fields with commas)
+    const match = line.match(/^([^,]+),([^,]+),("?\[.+?\]"?),/);
+    if (!match) continue;
+    
+    const name = match[1].trim();
+    const packageType = match[2].trim();
+    let versionsStr = match[3].trim();
+    
+    // Only process npm packages
+    if (packageType !== 'npm') continue;
+    
+    // Remove surrounding quotes if present
+    if (versionsStr.startsWith('"') && versionsStr.endsWith('"')) {
+      versionsStr = versionsStr.slice(1, -1);
+    }
+    
+    // Extract versions from format like "[1.0.1], [1.0.2]" or "[1.0.1]"
+    const versionMatches = versionsStr.match(/\[([^\]]+)\]/g);
+    if (versionMatches) {
+      versionMatches.forEach((vm) => {
+        const v = vm.replace(/^\[|\]$/g, '').trim();
+        if (v && /^[0-9]/.test(v)) {
+          results.push(`${name}@${v}`);
+        }
+      });
+    }
+  }
+  
+  // Dedupe
+  const seen = new Set();
+  return results.filter((spec) => (seen.has(spec) ? false : (seen.add(spec), true)));
+};
+
+// Extract package names and versions from raw HTML (handles JSON and HTML table formats)
+const extractImpactedFromHtml = (html) => {
+  const results = [];
+
+  // Wiz 2.0 JSON format embedded in page: {"Package":"name","Version":"= X.X.X || = Y.Y.Y"}
+  const jsonPackageRe = /\{"Package":"([^"]+)","Version":"([^"]*)"\}/g;
+  for (const m of html.matchAll(jsonPackageRe)) {
+    const name = m[1].trim();
+    const versionStr = m[2].trim();
+    if (!name || !versionStr) continue;
+    
+    // Extract versions from format like "= 1.0.1 || = 1.0.2" or "= 1.0.1"
+    const versionMatches = versionStr.match(/=\s*([0-9][0-9a-zA-Z._-]*)/g);
+    if (versionMatches) {
+      versionMatches.forEach((vm) => {
+        const v = vm.replace(/^=\s*/, '').trim();
+        if (v && /^[0-9]/.test(v)) {
+          results.push(`${name}@${v}`);
+        }
+      });
+    }
+  }
+
+  // JFrog research HTML table format: <td>package-name</td><td>[version]</td> or <td>[version, version2]</td>
+  const jfrogTableRe = /<td>([@a-z0-9._/-]+)<\/td>\s*<td>\[([^\]]+)\]<\/td>/gi;
+  for (const m of html.matchAll(jfrogTableRe)) {
+    const name = m[1].trim();
+    const versionStr = m[2].trim();
+    if (!name) continue;
+    
+    // Split on comma for multiple versions like "[1.0.1, 1.0.2]"
+    versionStr.split(',').forEach((v) => {
+      const ver = v.trim();
+      if (ver && /^[0-9]/.test(ver)) {
+        results.push(`${name}@${ver}`);
+      }
+    });
+  }
+
+  // Dedupe
+  const seen = new Set();
+  return results.filter((spec) => (seen.has(spec) ? false : (seen.add(spec), true)));
+};
+
+// Extract package names and versions from text content (supports Wiz, Snyk text, JFrog list formats)
 const extractImpactedFromText = (textContent) => {
   const results = [];
 
@@ -149,26 +240,37 @@ const decodeJsSingleQuoted = (src) => {
     .replace(/\\([\[\]{}])/g, '$1');
 };
 
-// Extract package names and versions from a web page
+// Extract package names and versions from a web page or CSV file
 const scrapeImpactedPackages = async (url) => {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
+  const timeout = setTimeout(() => controller.abort(), 30000);
   try {
-    // First attempt: Wiz/JFrog-style extraction directly from page HTML
     const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status} ${res.statusText}`);
-    const html = await res.text();
-    const firstPass = extractImpactedFromText(stripHtml(html));
-    if (firstPass.length) return firstPass;
+    const content = await res.text();
 
-    // Second attempt: Snyk bundle JSON embedded in modulepreload/module scripts
+    // Check if this is a CSV file (by URL or content)
+    if (url.endsWith('.csv') || content.startsWith('package_name,')) {
+      const csvPass = extractImpactedFromCsv(content);
+      if (csvPass.length) return csvPass;
+    }
+
+    // First attempt: Extract from raw HTML (JSON objects and HTML tables)
+    const htmlPass = extractImpactedFromHtml(content);
+    if (htmlPass.length) return htmlPass;
+
+    // Second attempt: Extract from stripped text (older formats)
+    const textPass = extractImpactedFromText(stripHtml(content));
+    if (textPass.length) return textPass;
+
+    // Third attempt: Snyk bundle JSON embedded in modulepreload/module scripts
     const scriptHrefs = [];
     const base = new URL(url);
     const modulePreloadRe = /<link[^>]+rel=["']modulepreload["'][^>]+href=["']([^"']+)["'][^>]*>/gi;
     const moduleScriptRe = /<script[^>]+type=["']module["'][^>]+src=["']([^"']+)["'][^>]*><\/script>/gi;
     let m;
-    while ((m = modulePreloadRe.exec(html))) scriptHrefs.push(new URL(m[1], base).toString());
-    while ((m = moduleScriptRe.exec(html))) scriptHrefs.push(new URL(m[1], base).toString());
+    while ((m = modulePreloadRe.exec(content))) scriptHrefs.push(new URL(m[1], base).toString());
+    while ((m = moduleScriptRe.exec(content))) scriptHrefs.push(new URL(m[1], base).toString());
 
     const marker = 'class:"vue--zero-day-packages"';
     const jsonParseRe = /JSON\.parse\('([\s\S]*?)'\)/;
@@ -201,7 +303,7 @@ const scrapeImpactedPackages = async (url) => {
       } catch {}
     }
 
-    throw new Error('Failed to locate Snyk data bundle in scripts.');
+    throw new Error(`Failed to extract package data from ${url}`);
   } finally {
     clearTimeout(timeout);
   }
