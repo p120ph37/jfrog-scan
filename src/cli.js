@@ -2,6 +2,7 @@
 import { Command } from 'commander';
 import { text } from 'node:stream/consumers';
 import { ArtifactoryClient } from './artifactoryClient.js';
+import { GitHubScanner } from './githubScanner.js';
 
 // Central list of suggested sources (also shown in --help)
 const SUGGESTED_SOURCES = [
@@ -14,7 +15,7 @@ const SUGGESTED_SOURCES = [
 ];
 
 const helpDescription = [
-  'Audit Artifactory npm proxy cache for package versions and last-download time',
+  'Audit Artifactory npm proxy cache or GitHub repos for compromised packages',
   '',
   'Suggested sources for --scrape-url / --scrape-all:',
   ...SUGGESTED_SOURCES.map((u) => `  - ${u}`),
@@ -23,11 +24,16 @@ const helpDescription = [
 const main = async () => {
   const opts = new Command('jfrog-scan')
     .description(helpDescription)
+    // Artifactory options
     .option('-u, --base-url <url>', 'Artifactory base URL (e.g., https://host/artifactory)', process.env.ARTIFACTORY_BASE_URL)
     .option('-r, --repo <name>', 'Artifactory repository key (npm remote/virtual)', process.env.ARTIFACTORY_REPOSITORY)
     .option('--username <name>', 'Artifactory username', process.env.ARTIFACTORY_USERNAME)
     .option('--password <pwd>', 'Artifactory password', process.env.ARTIFACTORY_PASSWORD)
     .option('--token <token>', 'Artifactory access token (preferred)', process.env.ARTIFACTORY_ACCESS_TOKEN)
+    // GitHub options
+    .option('--github-org <org>', 'GitHub organization to scan', process.env.GITHUB_ORG)
+    .option('--github-token <token>', 'GitHub personal access token', process.env.GITHUB_TOKEN)
+    // Package list options
     .option('--scrape-url <url>', 'Fetch a web page and extract impacted packages', (val, acc) => { (acc ||= []).push(val); return acc; }, [])
     .option('--scrape-all', 'Scrape and combine from all suggested sources', false)
     .option('--json', 'Output JSON instead of table', false)
@@ -58,12 +64,110 @@ const main = async () => {
     throw new Error('No packages specified.');
   }
 
+  // GitHub org scanning mode
+  if (opts.githubOrg) {
+    if (!opts.githubToken) {
+      throw new Error('--github-token is required when using --github-org');
+    }
+    await runGitHubScan(opts, specs);
+    return;
+  }
+
   // Output only if no Artifactory details
   if (!opts.baseUrl || !opts.repo) {
     console.log(specs.join('\n'));
     return;
   }
 
+  // Artifactory scanning mode
+  await runArtifactoryScan(opts, specs);
+};
+
+// GitHub organization scanning
+const runGitHubScan = async (opts, specs) => {
+  // Rate limit handler
+  const onRateLimit = opts.json ? null : (info) => {
+    process.stderr.write(`\n⏳ Rate limited. Waiting ${info.retryAfter}s (attempt ${info.retryCount + 1})...\n`);
+  };
+
+  const scanner = new GitHubScanner({
+    token: opts.githubToken,
+    org: opts.githubOrg,
+    onRateLimit,
+  });
+
+  const onProgress = opts.json ? null : (info) => {
+    if (info.type === 'repo') {
+      process.stderr.write(`\rScanning ${info.name}...`.padEnd(60));
+    }
+  };
+
+  const results = await scanner.scanOrg(specs, onProgress);
+  if (!opts.json) process.stderr.write('\r'.padEnd(60) + '\r');
+
+  // Filter to only results with findings
+  const withFindings = results.filter(
+    (r) => r.critical.length > 0 || r.danger.length > 0 || r.caution.length > 0 || r.errors.length > 0
+  );
+
+  if (opts.json) {
+    console.log(JSON.stringify(withFindings, null, 2));
+    return;
+  }
+
+  if (withFindings.length === 0) {
+    console.log('No compromised packages found in any repository.');
+    return;
+  }
+
+  // Table output
+  for (const result of withFindings) {
+    const location = result.path === 'package.json' 
+      ? `${result.repo}@${result.branch}` 
+      : `${result.repo}@${result.branch}:${result.path}`;
+    console.log(`\n${location}:`);
+    
+    if (result.critical.length > 0) {
+      console.log('  🔴 CRITICAL (lockfile points to compromised version - project was compromised):');
+      for (const m of result.critical) {
+        console.log(`    - ${m.name}@${m.version}`);
+      }
+    }
+    
+    if (result.danger.length > 0) {
+      console.log('  🟠 DANGER (semver range could install compromised version):');
+      for (const m of result.danger) {
+        console.log(`    - ${m.name}: "${m.range}" matches ${m.matchedVersion}`);
+      }
+    }
+    
+    if (result.caution.length > 0) {
+      console.log('  🟡 CAUTION (package name matches but semver excludes compromised versions):');
+      for (const m of result.caution) {
+        console.log(`    - ${m.name}: "${m.range}" (compromised: ${m.compromisedVersions})`);
+      }
+    }
+    
+    if (result.errors.length > 0) {
+      console.log('  ⚠️  ERRORS:');
+      for (const e of result.errors) {
+        console.log(`    - ${e}`);
+      }
+    }
+  }
+
+  // Summary
+  const criticalCount = withFindings.reduce((sum, r) => sum + r.critical.length, 0);
+  const dangerCount = withFindings.reduce((sum, r) => sum + r.danger.length, 0);
+  const cautionCount = withFindings.reduce((sum, r) => sum + r.caution.length, 0);
+  console.log(`\nSummary across ${withFindings.length} package locations:`);
+  console.log(`  🔴 CRITICAL: ${criticalCount} (lockfile matches - definitely compromised)`);
+  console.log(`  🟠 DANGER:   ${dangerCount} (semver could match - potentially compromised)`);
+  console.log(`  🟡 CAUTION:  ${cautionCount} (name matches - safe but watch for updates)`);
+};
+
+// Artifactory cache scanning
+const runArtifactoryScan = async (opts, specs) => {
   const results = await Promise.all(
     specs.map((spec) =>
       new ArtifactoryClient({

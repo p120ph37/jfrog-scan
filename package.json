@@ -1,9 +1,9 @@
 {
   "name": "jfrog-scan",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "CLI to audit JFrog Artifactory npm proxy cache for package versions and last-download time",
+  "description": "CLI to audit JFrog Artifactory and GitHub repos for compromised npm packages",
   "scripts": {
     "start": "node src/cli.js"
   },
@@ -14,7 +14,10 @@
     "jfrog-scan": "src/cli.js"
   },
   "dependencies": {
-    "commander": "^12.1.0"
+    "@octokit/plugin-throttling": "^9.0.0",
+    "@octokit/rest": "^21.0.0",
+    "commander": "^12.1.0",
+    "semver": "^7.6.0"
   },
   "devDependencies": {}
 }
